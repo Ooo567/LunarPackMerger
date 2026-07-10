@@ -5,15 +5,15 @@ A small utility to merge multiple Minecraft (1.8.9 / Lunar Client) resource
 pack .zip files into a single combined pack.
 
 Simple flow:
-  1. Add your packs.
-  2. Click "Review & Assign" -> pick a category (Swords, Blocks, GUI, ...)
-     -> pick which pack should win that whole category -> Apply.
-     The dropdown marks the pack with the most content for that category
-     as "(recommended)".
-  3. Need just one specific file? Use the "Advanced" tab to search, preview,
-     and assign individual files.
-  4. Merge. Packs are safety-checked automatically (heuristic scan) unless
-     you turn that off.
+  1. Add your "Collection" packs (the base look, merged by priority order).
+  2. Optionally pick ONE "Source" pack (e.g. a sword pack) and check exactly
+     which categories to pull from it (Swords, Blocks, GUI, ...). Nothing
+     is touched unless you check its box.
+  3. Optionally set a custom pack icon.
+  4. Merge. Packs are safety-checked automatically unless you turn that off.
+
+Need finer control than whole categories (just one specific file)? Use the
+"Advanced: override individual files" button.
 
 No network access, no telemetry, no personal data collected or embedded.
 """
@@ -40,7 +40,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 APP_TITLE = "Lunar Pack Merger"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 JUNK_NAMES = {"__MACOSX", ".DS_Store", "Thumbs.db"}
 
@@ -52,7 +52,7 @@ DEFAULT_MCMETA = """{
 }
 """
 
-MAX_REVIEW_ROWS = 400
+MAX_ADVANCED_ROWS = 400
 
 CATEGORY_ORDER = [
     "Swords",
@@ -60,7 +60,7 @@ CATEGORY_ORDER = [
     "Armor",
     "Blocks",
     "Items (other)",
-    "GUI",
+    "GUI (includes hearts/hunger/hotbar)",
     "Mobs & Entities",
     "Environment (sky/sun/moon/weather)",
     "Particles",
@@ -72,7 +72,6 @@ CATEGORY_ORDER = [
     "Other / Misc",
 ]
 
-# File types that should never appear inside a resource pack.
 SUSPICIOUS_EXTENSIONS = {
     ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs",
     ".js", ".jar", ".msi", ".sh", ".py", ".pyc", ".class", ".apk",
@@ -92,7 +91,7 @@ def categorize(rel_path: str) -> str:
     if "/font/" in lower:
         return "Font"
     if "/gui/" in lower or lower.startswith("gui/"):
-        return "GUI"
+        return "GUI (includes hearts/hunger/hotbar)"
     if "/particle" in lower:
         return "Particles"
     if "/environment/" in lower:
@@ -118,11 +117,11 @@ def categorize(rel_path: str) -> str:
     return "Other / Misc"
 
 
-def safety_scan_pack(pack_path: str) -> list[dict]:
+def safety_scan_pack(pack_path: str) -> list:
     """Heuristic-only static checks: suspicious file types, disguised files,
     path traversal, and zip-bomb-style size ratios. This is NOT a real
-    antivirus engine and cannot catch everything — it just flags patterns
-    that never belong in a legitimate resource pack."""
+    antivirus engine — it just flags patterns that never belong in a
+    legitimate resource pack."""
     issues = []
     try:
         with zipfile.ZipFile(pack_path, "r") as zf:
@@ -201,7 +200,7 @@ def safety_scan_pack(pack_path: str) -> list[dict]:
     return issues
 
 
-def format_issues(issues: list[dict]) -> str:
+def format_issues(issues: list) -> str:
     lines = []
     for issue in issues:
         marker = "\U0001F534" if issue["severity"] == "high" else "\U0001F7E1"
@@ -220,14 +219,21 @@ class MergerApp(ctk.CTk):
         super().__init__()
 
         self.title(f"{APP_TITLE} v{APP_VERSION}")
-        self.geometry("840x700")
-        self.minsize(740, 600)
+        self.geometry("880x820")
+        self.minsize(760, 700)
 
-        self.packs: list[PackEntry] = []
-        self.selected_index: int | None = None
+        self.collection: list = []           # base packs, priority order
+        self.selected_index = None
 
-        self.file_index: dict[str, list[str]] = {}
-        self.assignments: dict[str, str] = {}
+        self.source_pack: PackEntry | None = None
+        self.category_vars: dict = {}          # category -> BooleanVar
+
+        self.icon_path: str | None = None
+
+        # rel_path -> [pack_path,...] (collection only)
+        self.file_index: dict = {}
+        # rel_path -> pack_path (explicit override)
+        self.assignments: dict = {}
 
         self.safety_enabled = ctk.BooleanVar(value=True)
 
@@ -237,26 +243,134 @@ class MergerApp(ctk.CTk):
     def _build_ui(self):
         pad = 16
 
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=pad, pady=(pad, 4))
+        scroll_root = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        scroll_root.pack(fill="both", expand=True)
 
+        header = ctk.CTkFrame(scroll_root, fg_color="transparent")
+        header.pack(fill="x", padx=pad, pady=(pad, 4))
         ctk.CTkLabel(
             header, text="Lunar Pack Merger",
             font=ctk.CTkFont(size=22, weight="bold")
         ).pack(anchor="w")
-
         ctk.CTkLabel(
             header,
-            text="Add your packs, then click \u201cReview & Assign\u201d to pick which "
-                 "pack wins each category (Swords, Blocks, GUI, ...).",
-            font=ctk.CTkFont(size=12),
-            text_color="gray70",
-            wraplength=780,
-            justify="left",
+            text="1. Add your Collection.  2. (Optional) pick one Source pack and "
+                 "check which categories to pull from it.  3. Merge.",
+            font=ctk.CTkFont(size=12), text_color="gray70",
+            wraplength=800, justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
-        safety_row = ctk.CTkFrame(self, fg_color="#1f2937", corner_radius=8)
-        safety_row.pack(fill="x", padx=pad, pady=(10, 8))
+        # ---- Collection ----
+        coll_frame = ctk.CTkFrame(scroll_root)
+        coll_frame.pack(fill="x", padx=pad, pady=(10, 8))
+        ctk.CTkLabel(
+            coll_frame, text="1. Collection (base packs, merged by priority order)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        coll_body = ctk.CTkFrame(coll_frame, fg_color="transparent")
+        coll_body.pack(fill="x", padx=12, pady=(0, 12))
+
+        self.list_scroll = ctk.CTkScrollableFrame(
+            coll_body, label_text="", height=140)
+        self.list_scroll.pack(side="left", fill="both",
+                              expand=True, padx=(0, 10))
+
+        coll_btns = ctk.CTkFrame(coll_body, fg_color="transparent", width=170)
+        coll_btns.pack(side="left", fill="y")
+        ctk.CTkButton(coll_btns, text="\uFF0B Add Pack(s)", command=self.add_packs).pack(
+            fill="x", pady=(0, 6)
+        )
+        ctk.CTkButton(
+            coll_btns, text="\U0001F6E1\uFE0F Check Safety", command=self.check_selected_safety
+        ).pack(fill="x", pady=6)
+        ctk.CTkButton(
+            coll_btns, text="\u2715 Remove", fg_color="#7f1d1d", hover_color="#991b1b",
+            command=self.remove_selected
+        ).pack(fill="x", pady=6)
+        ctk.CTkButton(
+            coll_btns, text="Clear All", fg_color="transparent", border_width=1,
+            text_color=("gray10", "gray90"), command=self.clear_all
+        ).pack(fill="x", pady=6)
+
+        # ---- Source pack + categories ----
+        src_frame = ctk.CTkFrame(scroll_root)
+        src_frame.pack(fill="x", padx=pad, pady=8)
+        ctk.CTkLabel(
+            src_frame, text="2. Import specific categories from ONE Source pack (optional)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        ctk.CTkLabel(
+            src_frame,
+            text="Nothing is imported unless you check its box below. Example: check only "
+                 "\u201cSwords\u201d to pull just the sword textures from the Source pack, "
+                 "leaving everything else from your Collection untouched.",
+            text_color="gray60", font=ctk.CTkFont(size=11), wraplength=800, justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        src_row = ctk.CTkFrame(src_frame, fg_color="transparent")
+        src_row.pack(fill="x", padx=12, pady=(0, 10))
+        self.source_label = ctk.CTkLabel(
+            src_row, text="No source pack selected.", text_color="gray60", anchor="w"
+        )
+        self.source_label.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(src_row, text="Choose Source Pack", command=self.choose_source_pack).pack(
+            side="left", padx=(8, 4)
+        )
+        ctk.CTkButton(
+            src_row, text="Clear", fg_color="transparent", border_width=1,
+            text_color=("gray10", "gray90"), width=70, command=self.clear_source_pack,
+        ).pack(side="left")
+
+        cat_grid = ctk.CTkFrame(src_frame, fg_color="transparent")
+        cat_grid.pack(fill="x", padx=12, pady=(0, 12))
+        cols = 3
+        for idx, cat in enumerate(CATEGORY_ORDER):
+            var = ctk.BooleanVar(value=False)
+            self.category_vars[cat] = var
+            cb = ctk.CTkCheckBox(cat_grid, text=cat,
+                                 variable=var, font=ctk.CTkFont(size=12))
+            cb.grid(row=idx // cols, column=idx %
+                    cols, sticky="w", padx=8, pady=6)
+        for c in range(cols):
+            cat_grid.columnconfigure(c, weight=1)
+
+        # ---- Icon ----
+        icon_frame = ctk.CTkFrame(scroll_root)
+        icon_frame.pack(fill="x", padx=pad, pady=8)
+        ctk.CTkLabel(
+            icon_frame, text="3. Pack icon (optional)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        icon_row = ctk.CTkFrame(icon_frame, fg_color="transparent")
+        icon_row.pack(fill="x", padx=12, pady=(0, 12))
+        self.icon_label = ctk.CTkLabel(
+            icon_row,
+            text="No custom icon \u2014 will use pack.png from a Collection pack if one exists.",
+            text_color="gray60", anchor="w", wraplength=500,
+        )
+        self.icon_label.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(icon_row, text="Choose Icon (PNG)", command=self.choose_icon).pack(
+            side="left", padx=(8, 4)
+        )
+        ctk.CTkButton(
+            icon_row, text="Clear", fg_color="transparent", border_width=1,
+            text_color=("gray10", "gray90"), width=70, command=self.clear_icon,
+        ).pack(side="left")
+
+        # ---- Advanced ----
+        adv_frame = ctk.CTkFrame(scroll_root, fg_color="transparent")
+        adv_frame.pack(fill="x", padx=pad, pady=(0, 8))
+        ctk.CTkButton(
+            adv_frame, text="\U0001F50D Advanced: override individual files",
+            fg_color="#7c3aed", hover_color="#6d28d9",
+            command=self.open_advanced_window,
+        ).pack(fill="x")
+
+        # ---- Safety toggle ----
+        safety_row = ctk.CTkFrame(
+            scroll_root, fg_color="#1f2937", corner_radius=8)
+        safety_row.pack(fill="x", padx=pad, pady=8)
         ctk.CTkCheckBox(
             safety_row, text="\U0001F6E1\uFE0F Safety-check packs (recommended)",
             variable=self.safety_enabled, font=ctk.CTkFont(
@@ -264,56 +378,15 @@ class MergerApp(ctk.CTk):
         ).pack(side="left", padx=12, pady=10)
         ctk.CTkLabel(
             safety_row,
-            text="Flags suspicious file types, disguised files, and zip bombs. "
-                 "This is a basic heuristic check, not a full antivirus \u2014 scan "
-                 "with real antivirus too if you're unsure.",
+            text="Flags suspicious file types, disguised files, and zip bombs. Basic "
+                 "heuristic check, not a full antivirus.",
             text_color="#93c5fd", font=ctk.CTkFont(size=11),
-            wraplength=520, justify="left",
+            wraplength=480, justify="left",
         ).pack(side="left", padx=(0, 12), pady=10)
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=pad, pady=(0, 0))
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
-
-        list_frame = ctk.CTkFrame(body)
-        list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-
-        self.list_scroll = ctk.CTkScrollableFrame(
-            list_frame, label_text="Packs")
-        self.list_scroll.pack(fill="both", expand=True, padx=8, pady=8)
-
-        btns = ctk.CTkFrame(body, fg_color="transparent", width=190)
-        btns.grid(row=0, column=1, sticky="ns")
-
-        ctk.CTkButton(btns, text="\uFF0B Add Pack(s)", command=self.add_packs).pack(
-            fill="x", pady=(0, 8)
-        )
-        ctk.CTkButton(
-            btns, text="\U0001F6E1\uFE0F Check Selected\nPack's Safety",
-            command=self.check_selected_safety,
-        ).pack(fill="x", pady=(0, 8))
-        ctk.CTkButton(
-            btns, text="\u2715 Remove Selected", fg_color="#7f1d1d",
-            hover_color="#991b1b", command=self.remove_selected
-        ).pack(fill="x", pady=(4, 16))
-
-        ctk.CTkButton(
-            btns, text="\U0001F50D Review &\nAssign", height=48,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#7c3aed", hover_color="#6d28d9",
-            command=self.open_review_window,
-        ).pack(fill="x", pady=(0, 16))
-
-        ctk.CTkButton(
-            btns, text="Clear All", fg_color="transparent",
-            border_width=1, text_color=("gray10", "gray90"),
-            command=self.clear_all
-        ).pack(fill="x", pady=4)
-
-        out = ctk.CTkFrame(self)
-        out.pack(fill="x", padx=pad, pady=(10, 8))
-
+        # ---- Output ----
+        out = ctk.CTkFrame(scroll_root)
+        out.pack(fill="x", padx=pad, pady=8)
         ctk.CTkLabel(out, text="Output pack name:").grid(
             row=0, column=0, sticky="w", padx=10, pady=(10, 4)
         )
@@ -321,7 +394,6 @@ class MergerApp(ctk.CTk):
         self.output_name.grid(
             row=0, column=1, sticky="ew", padx=10, pady=(10, 4))
         out.columnconfigure(1, weight=1)
-
         ctk.CTkLabel(out, text="Description (optional):").grid(
             row=1, column=0, sticky="w", padx=10, pady=(4, 10)
         )
@@ -331,27 +403,25 @@ class MergerApp(ctk.CTk):
         self.output_desc.grid(
             row=1, column=1, sticky="ew", padx=10, pady=(4, 10))
 
-        action = ctk.CTkFrame(self, fg_color="transparent")
+        # ---- Merge ----
+        action = ctk.CTkFrame(scroll_root, fg_color="transparent")
         action.pack(fill="x", padx=pad, pady=(0, 6))
-
         self.merge_btn = ctk.CTkButton(
             action, text="Merge Packs", height=42,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            command=self.merge_packs,
+            font=ctk.CTkFont(size=15, weight="bold"), command=self.merge_packs,
         )
         self.merge_btn.pack(fill="x")
-
         self.progress = ctk.CTkProgressBar(action)
         self.progress.pack(fill="x", pady=(8, 0))
         self.progress.set(0)
 
-        log_frame = ctk.CTkFrame(self)
+        # ---- Log ----
+        log_frame = ctk.CTkFrame(scroll_root)
         log_frame.pack(fill="both", expand=False, padx=pad, pady=(0, pad))
         ctk.CTkLabel(log_frame, text="Log", anchor="w").pack(
-            fill="x", padx=10, pady=(8, 0)
-        )
+            fill="x", padx=10, pady=(8, 0))
         self.log_box = ctk.CTkTextbox(
-            log_frame, height=120, font=ctk.CTkFont(size=11))
+            log_frame, height=140, font=ctk.CTkFont(size=11))
         self.log_box.pack(fill="both", expand=True, padx=10, pady=(2, 10))
         self.log_box.configure(state="disabled")
 
@@ -369,15 +439,13 @@ class MergerApp(ctk.CTk):
         for child in self.list_scroll.winfo_children():
             child.destroy()
 
-        if not self.packs:
+        if not self.collection:
             ctk.CTkLabel(
-                self.list_scroll,
-                text="No packs added yet. Click \u201cAdd Pack(s)\u201d to choose .zip files.",
-                text_color="gray60",
-            ).pack(pady=20)
+                self.list_scroll, text="No packs added yet.", text_color="gray60",
+            ).pack(pady=10)
             return
 
-        for i, entry in enumerate(self.packs):
+        for i, entry in enumerate(self.collection):
             row = ctk.CTkFrame(
                 self.list_scroll,
                 fg_color="#2563eb" if i == self.selected_index else "#242424",
@@ -385,7 +453,6 @@ class MergerApp(ctk.CTk):
             )
             row.pack(fill="x", pady=3, padx=2)
             row.bind("<Button-1>", lambda e, idx=i: self._select(idx))
-
             label = ctk.CTkLabel(row, text=entry.name,
                                  anchor="w", font=ctk.CTkFont(size=13))
             label.pack(side="left", padx=10, pady=8, fill="x", expand=True)
@@ -409,17 +476,15 @@ class MergerApp(ctk.CTk):
                 f"\"{pack_name}\" contains suspicious content:\n\n"
                 f"{format_issues(high)}\n\n"
                 f"We recommend deleting this file immediately and not opening it in "
-                f"Minecraft.\n\nNote: this is a basic automated check (suspicious file "
-                f"types, disguised files, path traversal, zip bombs) \u2014 not a full "
-                f"antivirus scan. If you're unsure, also scan it with your antivirus "
-                f"or upload it to virustotal.com.",
+                f"Minecraft.\n\nNote: this is a basic automated check \u2014 not a full "
+                f"antivirus scan. If you're unsure, also scan it with your antivirus or "
+                f"upload it to virustotal.com.",
             )
         elif medium:
             self.log(
-                f"\U0001F7E1 {pack_name}: {len(medium)} minor issue(s) flagged (not necessarily malicious).")
+                f"\U0001F7E1 {pack_name}: {len(medium)} minor issue(s) flagged.")
         elif not silent_if_clean:
-            self.log(
-                f"\u2705 {pack_name}: no issues found by the safety check.")
+            self.log(f"\u2705 {pack_name}: no issues found.")
 
         return issues
 
@@ -427,45 +492,38 @@ class MergerApp(ctk.CTk):
         i = self.selected_index
         if i is None:
             messagebox.showinfo(
-                APP_TITLE, "Click a pack in the list first to select it.")
+                APP_TITLE, "Click a pack in the Collection list first.")
             return
-        entry = self.packs[i]
+        entry = self.collection[i]
         self.log(f"Running safety check on {entry.name}...")
         issues = self._run_safety_check(entry.path, entry.name)
         if not issues:
             messagebox.showinfo(
-                APP_TITLE,
-                f"\u2705 No issues found in \"{entry.name}\".\n\n"
-                f"Note: this is a basic heuristic check, not a substitute for real antivirus.",
-            )
+                APP_TITLE, f"\u2705 No issues found in \"{entry.name}\".")
 
     # -------------------------------------------------------------- actions
     def add_packs(self):
         paths = filedialog.askopenfilenames(
-            title="Select resource pack .zip files",
-            filetypes=[("Zip files", "*.zip")],
+            title="Select resource pack .zip files", filetypes=[("Zip files", "*.zip")],
         )
         if not paths:
             return
         for p in paths:
-            self.packs.append(PackEntry(p))
-        self.log(f"Added {len(paths)} pack(s).")
+            self.collection.append(PackEntry(p))
+        self.log(f"Added {len(paths)} pack(s) to Collection.")
         self.file_index = {}
-
         if self.safety_enabled.get():
             for p in paths:
                 self._run_safety_check(
                     p, os.path.basename(p), silent_if_clean=True)
-
         self._refresh_list()
 
     def remove_selected(self):
         i = self.selected_index
         if i is None:
-            messagebox.showinfo(
-                APP_TITLE, "Click a pack in the list first to select it.")
+            messagebox.showinfo(APP_TITLE, "Click a pack in the list first.")
             return
-        removed = self.packs.pop(i)
+        removed = self.collection.pop(i)
         self.log(f"Removed {removed.name}.")
         self.selected_index = None
         self.file_index = {}
@@ -473,22 +531,62 @@ class MergerApp(ctk.CTk):
         self._refresh_list()
 
     def clear_all(self):
-        self.packs = []
+        self.collection = []
         self.selected_index = None
         self.file_index = {}
         self.assignments = {}
         self._refresh_list()
-        self.log("Cleared list.")
+        self.log("Cleared Collection.")
+
+    def choose_source_pack(self):
+        path = filedialog.askopenfilename(
+            title="Select the Source pack", filetypes=[("Zip files", "*.zip")],
+        )
+        if not path:
+            return
+        self.source_pack = PackEntry(path)
+        self.source_label.configure(
+            text=f"Source: {self.source_pack.name}", text_color="white")
+        self.log(f"Source pack set to {self.source_pack.name}.")
+        if self.safety_enabled.get():
+            self._run_safety_check(
+                path, self.source_pack.name, silent_if_clean=True)
+
+    def clear_source_pack(self):
+        self.source_pack = None
+        self.source_label.configure(
+            text="No source pack selected.", text_color="gray60")
+        for var in self.category_vars.values():
+            var.set(False)
+
+    def choose_icon(self):
+        path = filedialog.askopenfilename(
+            title="Select a pack icon", filetypes=[("PNG images", "*.png")],
+        )
+        if not path:
+            return
+        self.icon_path = path
+        self.icon_label.configure(
+            text=f"Icon: {os.path.basename(path)}", text_color="white")
+
+    def clear_icon(self):
+        self.icon_path = None
+        self.icon_label.configure(
+            text="No custom icon \u2014 will use pack.png from a Collection pack if one exists.",
+            text_color="gray60",
+        )
 
     def _prune_assignments(self):
-        valid_paths = {p.path for p in self.packs}
+        valid_paths = {p.path for p in self.collection}
+        if self.source_pack:
+            valid_paths.add(self.source_pack.path)
         self.assignments = {k: v for k,
                             v in self.assignments.items() if v in valid_paths}
 
     # -------------------------------------------------------- file scanning
     def scan_file_index(self):
         self.file_index = {}
-        for entry in self.packs:
+        for entry in self.collection:
             try:
                 with zipfile.ZipFile(entry.path, "r") as zf:
                     for name in zf.namelist():
@@ -506,7 +604,7 @@ class MergerApp(ctk.CTk):
 
     def default_winner(self, rel_path: str):
         owners = set(self.file_index.get(rel_path, []))
-        for entry in self.packs:
+        for entry in self.collection:
             if entry.path in owners:
                 return entry.path
         return None
@@ -517,173 +615,55 @@ class MergerApp(ctk.CTk):
             return assigned
         return self.default_winner(rel_path)
 
-    # -------------------------------------------------------- review window
-    def open_review_window(self):
-        if len(self.packs) < 2:
-            messagebox.showinfo(APP_TITLE, "Add at least two packs first.")
+    # ---------------------------------------------------- advanced (popup)
+    def open_advanced_window(self):
+        if not self.collection:
+            messagebox.showinfo(
+                APP_TITLE, "Add at least one Collection pack first.")
             return
 
         self.log("Scanning packs for files...")
         self.scan_file_index()
-        conflicts = [p for p, owners in self.file_index.items()
-                     if len(set(owners)) > 1]
+        conflicts = sorted(
+            p for p, owners in self.file_index.items() if len(set(owners)) > 1)
         self.log(
-            f"Found {len(conflicts)} file(s) that appear in more than one pack.")
+            f"Found {len(conflicts)} file(s) that differ across your Collection.")
 
         win = ctk.CTkToplevel(self)
-        win.title("Review & Assign")
-        win.geometry("860x660")
+        win.title("Advanced: override individual files")
+        win.geometry("760x620")
         win.grab_set()
 
+        tip = ("For fine control over one specific file (e.g. just diamond_sword.png), "
+               "search for it here and preview before choosing.")
+        if not PIL_AVAILABLE:
+            tip += "\n(Preview needs the 'Pillow' package: pip install Pillow)"
         ctk.CTkLabel(
-            win,
-            text=f"{len(conflicts)} file(s) differ between your packs. Pick which "
-            f"pack wins each category below.",
-            font=ctk.CTkFont(size=13), text_color="gray70", wraplength=820,
-            justify="left",
+            win, text=tip, font=ctk.CTkFont(size=12), text_color="gray70",
+            wraplength=720, justify="left",
         ).pack(anchor="w", padx=14, pady=(14, 6))
 
-        tabs = ctk.CTkTabview(win)
-        tabs.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        tab_cat = tabs.add("By Category (recommended)")
-        tab_adv = tabs.add("Advanced (search + preview)")
-
-        self._build_category_tab(tab_cat, conflicts, win)
-        self._build_advanced_tab(tab_adv, conflicts)
-
-    # ---- category tab ----
-    def _build_category_tab(self, parent, conflicts, win):
-        by_category: dict[str, list[str]] = {}
-        for rel_path in conflicts:
-            by_category.setdefault(categorize(rel_path), []).append(rel_path)
-
-        ordered_cats = [c for c in CATEGORY_ORDER if c in by_category]
-        ordered_cats += sorted(c for c in by_category if c not in CATEGORY_ORDER)
-
-        top_row = ctk.CTkFrame(parent, fg_color="transparent")
-        top_row.pack(fill="x", pady=(6, 8))
-
-        status = ctk.CTkLabel(
-            parent, text="", text_color="gray60", font=ctk.CTkFont(size=11))
-
-        scroll = ctk.CTkScrollableFrame(parent, label_text="Categories")
-        scroll.pack(fill="both", expand=True)
-
-        row_state = {}
-
-        def pack_counts_for(paths):
-            counts = {}
-            for rp in paths:
-                for owner in set(self.file_index[rp]):
-                    counts[owner] = counts.get(owner, 0) + 1
-            return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-
-        def apply_category(category, paths):
-            state = row_state[category]
-            label = state["menu"].get()
-            target_path = state["path_by_label"].get(label)
-            if not target_path:
-                return
-            count = 0
-            for rp in paths:
-                if target_path in set(self.file_index[rp]):
-                    self.assignments[rp] = target_path
-                    count += 1
-            status.configure(
-                text=f"Applied {os.path.basename(target_path)} to {count} file(s) in "
-                f"\u201c{category}\u201d."
-            )
-
-        for category in ordered_cats:
-            paths = by_category[category]
-            ranked = pack_counts_for(paths)
-
-            row = ctk.CTkFrame(scroll, fg_color="#242424", corner_radius=8)
-            row.pack(fill="x", pady=4, padx=2)
-
-            left = ctk.CTkFrame(row, fg_color="transparent")
-            left.pack(side="left", padx=12, pady=10, fill="x", expand=True)
-            ctk.CTkLabel(
-                left, text=category, font=ctk.CTkFont(size=13, weight="bold"), anchor="w"
-            ).pack(anchor="w")
-            ctk.CTkLabel(
-                left, text=f"{len(paths)} file(s) differ across your packs",
-                text_color="gray60", font=ctk.CTkFont(size=11), anchor="w"
-            ).pack(anchor="w")
-
-            labels = []
-            path_by_label = {}
-            for idx, (pack_path, cnt) in enumerate(ranked):
-                name = os.path.basename(pack_path)
-                lbl = f"{name}  \u2014 {cnt} file(s)"
-                if idx == 0:
-                    lbl += "  (recommended)"
-                labels.append(lbl)
-                path_by_label[lbl] = pack_path
-
-            menu = ctk.CTkOptionMenu(row, values=labels, width=280)
-            if labels:
-                menu.set(labels[0])
-            menu.pack(side="left", padx=(0, 10))
-
-            row_state[category] = {"menu": menu,
-                                   "path_by_label": path_by_label}
-
-            ctk.CTkButton(
-                row, text="Apply", width=80,
-                command=lambda c=category, p=paths: apply_category(c, p),
-            ).pack(side="left", padx=(0, 12))
-
-        ctk.CTkButton(
-            top_row, text="\u2713 Apply Recommended to All Categories",
-            command=lambda: [apply_category(
-                c, by_category[c]) for c in ordered_cats],
-        ).pack(side="left")
-
-        status.pack(anchor="w", pady=(8, 0))
-
-        ctk.CTkButton(parent, text="Done", height=38, command=win.destroy).pack(
-            fill="x", pady=(10, 0)
-        )
-
-    # ---- advanced (search + preview) tab ----
-    def _build_advanced_tab(self, parent, conflicts):
-        conflicts_sorted = sorted(conflicts)
-
-        tip_text = ("For fine control over one specific file (e.g. just "
-                    "diamond_sword.png), search for it here and preview before choosing.")
-        if not PIL_AVAILABLE:
-            tip_text += "\n(Image preview needs the 'Pillow' package — install with: pip install Pillow)"
-
-        ctk.CTkLabel(
-            parent, text=tip_text, font=ctk.CTkFont(size=12), text_color="gray70",
-            wraplength=800, justify="left",
-        ).pack(anchor="w", pady=(6, 6))
-
-        search_row = ctk.CTkFrame(parent, fg_color="transparent")
-        search_row.pack(fill="x", pady=(0, 8))
-
+        search_row = ctk.CTkFrame(win, fg_color="transparent")
+        search_row.pack(fill="x", padx=14, pady=(0, 8))
         search_var = ctk.StringVar()
         ctk.CTkEntry(
             search_row, placeholder_text="Search files, e.g. diamond_sword...",
             textvariable=search_var,
-        ).pack(side="left", fill="x", expand=True)
+        ).pack(fill="x")
 
-        results_scroll = ctk.CTkScrollableFrame(parent, label_text="Files")
-        results_scroll.pack(fill="both", expand=True, pady=(0, 8))
-
-        status_label = ctk.CTkLabel(
-            parent, text="", text_color="gray60", font=ctk.CTkFont(size=11))
-        status_label.pack(anchor="w")
+        results_scroll = ctk.CTkScrollableFrame(win, label_text="Files")
+        results_scroll.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        status_label = ctk.CTkLabel(win, text="Type above to search files.",
+                                    text_color="gray60", font=ctk.CTkFont(size=11))
+        status_label.pack(anchor="w", padx=14, pady=(0, 10))
 
         def render(filtered_paths):
             for child in results_scroll.winfo_children():
                 child.destroy()
-
-            shown = filtered_paths[:MAX_REVIEW_ROWS]
+            shown = filtered_paths[:MAX_ADVANCED_ROWS]
             for rel_path in shown:
                 owner_set = set(self.file_index[rel_path])
-                owners = [p.path for p in self.packs if p.path in owner_set]
+                owners = [p.path for p in self.collection if p.path in owner_set]
                 owner_names = [os.path.basename(p) for p in owners]
                 current_winner = self.winner_for(rel_path)
                 current_name = os.path.basename(
@@ -693,17 +673,14 @@ class MergerApp(ctk.CTk):
                 row = ctk.CTkFrame(
                     results_scroll, fg_color="#242424", corner_radius=6)
                 row.pack(fill="x", pady=2, padx=2)
-
                 ctk.CTkLabel(
-                    row, text=rel_path, anchor="w", font=ctk.CTkFont(size=11),
-                    wraplength=360,
+                    row, text=rel_path, anchor="w", font=ctk.CTkFont(size=11), wraplength=340,
                 ).pack(side="left", padx=(10, 6), pady=6, fill="x", expand=True)
 
                 if PIL_AVAILABLE and rel_path.lower().endswith((".png", ".jpg", ".jpeg")):
                     ctk.CTkButton(
-                        row, text="\U0001F441 Preview", width=90,
-                        fg_color="transparent", border_width=1,
-                        text_color=("gray10", "gray90"),
+                        row, text="\U0001F441 Preview", width=90, fg_color="transparent",
+                        border_width=1, text_color=("gray10", "gray90"),
                         command=lambda rp=rel_path, ow=owners, on=owner_names:
                             self.open_image_preview(rp, ow, on),
                     ).pack(side="right", padx=(0, 8), pady=6)
@@ -712,15 +689,15 @@ class MergerApp(ctk.CTk):
                     self.assignments[rp] = pbn[choice]
 
                 menu = ctk.CTkOptionMenu(
-                    row, values=owner_names, width=170, command=on_pick)
+                    row, values=owner_names, width=160, command=on_pick)
                 menu.set(current_name)
                 menu.pack(side="right", padx=10, pady=6)
 
             extra = len(filtered_paths) - len(shown)
             if extra > 0:
                 status_label.configure(
-                    text=f"Showing {len(shown)} of {len(filtered_paths)} \u2014 narrow "
-                    f"your search to see the rest ({extra} hidden)."
+                    text=f"Showing {len(shown)} of {len(filtered_paths)} \u2014 narrow your "
+                    f"search to see the rest ({extra} hidden)."
                 )
             elif filtered_paths:
                 status_label.configure(
@@ -735,30 +712,27 @@ class MergerApp(ctk.CTk):
             if not q:
                 status_label.configure(text="Type above to search files.")
                 return
-            render([p for p in conflicts_sorted if q in p.lower()])
+            render([p for p in conflicts if q in p.lower()])
 
         search_var.trace_add("write", on_search)
-        status_label.configure(text="Type above to search files.")
+        ctk.CTkButton(win, text="Done", height=38, command=win.destroy).pack(
+            fill="x", padx=14, pady=(0, 14)
+        )
 
     def open_image_preview(self, rel_path, owners, owner_names):
         if not PIL_AVAILABLE:
             messagebox.showinfo(
-                APP_TITLE, "Image preview needs the 'Pillow' package.\nInstall with: pip install Pillow"
-            )
+                APP_TITLE, "Preview needs the 'Pillow' package.")
             return
-
         win = ctk.CTkToplevel(self)
         win.title(f"Preview: {rel_path}")
         win.geometry("420x480")
         win.grab_set()
-
         ctk.CTkLabel(win, text=rel_path, font=ctk.CTkFont(size=12), wraplength=380).pack(
             padx=14, pady=(14, 6)
         )
-
         img_label = ctk.CTkLabel(win, text="")
         img_label.pack(padx=14, pady=6, fill="both", expand=True)
-
         path_by_name = dict(zip(owner_names, owners))
 
         def load(pack_name):
@@ -779,37 +753,48 @@ class MergerApp(ctk.CTk):
         picker = ctk.CTkOptionMenu(win, values=owner_names, command=load)
         picker.set(owner_names[0])
         picker.pack(padx=14, pady=(0, 14))
-
         load(owner_names[0])
 
     # -------------------------------------------------------------- merge
     def merge_packs(self):
-        if len(self.packs) < 2:
+        if not self.collection:
             messagebox.showwarning(
-                APP_TITLE, "Add at least two packs to merge.")
+                APP_TITLE, "Add at least one Collection pack.")
             return
+
+        checked_categories = {
+            c for c, v in self.category_vars.items() if v.get()}
+        if self.source_pack and not checked_categories:
+            proceed = messagebox.askyesno(
+                APP_TITLE,
+                "You picked a Source pack but didn't check any categories, so nothing "
+                "will be imported from it. Continue anyway?",
+            )
+            if not proceed:
+                return
+
+        packs_to_check = list(self.collection)
+        if self.source_pack:
+            packs_to_check.append(self.source_pack)
 
         if self.safety_enabled.get():
             self.log("Running safety check on all packs before merging...")
             blocking = []
-            for entry in self.packs:
+            for entry in packs_to_check:
                 issues = safety_scan_pack(entry.path)
                 high = [i for i in issues if i["severity"] == "high"]
                 if high:
                     blocking.append((entry.name, high))
-
             if blocking:
                 details = "\n\n".join(
-                    f"{name}:\n{format_issues(issues)}" for name, issues in blocking
-                )
+                    f"{name}:\n{format_issues(iss)}" for name, iss in blocking)
                 self.log(
                     f"\U0001F534 Merge blocked \u2014 {len(blocking)} pack(s) flagged.")
                 messagebox.showerror(
                     "\u26A0\uFE0F Merge blocked \u2014 possible malicious content",
-                    f"The following pack(s) were flagged and the merge was stopped:\n\n"
-                    f"{details}\n\n"
-                    f"Remove the flagged pack(s), or if you're confident this is a "
-                    f"false positive, turn off \u201cSafety-check packs\u201d and try again.",
+                    f"Flagged and stopped:\n\n{details}\n\nRemove the flagged pack(s), or "
+                    f"turn off \u201cSafety-check packs\u201d if you're sure it's a false "
+                    f"positive, then try again.",
                 )
                 return
 
@@ -817,10 +802,8 @@ class MergerApp(ctk.CTk):
         out_name = "".join(c for c in out_name if c not in '\\/:*?"<>|')
 
         dest = filedialog.asksaveasfilename(
-            title="Save merged pack as...",
-            defaultextension=".zip",
-            initialfile=f"{out_name}.zip",
-            filetypes=[("Zip files", "*.zip")],
+            title="Save merged pack as...", defaultextension=".zip",
+            initialfile=f"{out_name}.zip", filetypes=[("Zip files", "*.zip")],
         )
         if not dest:
             return
@@ -828,9 +811,13 @@ class MergerApp(ctk.CTk):
         self.merge_btn.configure(state="disabled", text="Merging...")
         self.progress.set(0)
         self.log("---- Starting merge ----")
+        self.log(f"Collection: {', '.join(p.name for p in self.collection)}")
+        if self.source_pack and checked_categories:
+            self.log(
+                f"Importing from {self.source_pack.name}: {', '.join(sorted(checked_categories))}")
 
         try:
-            self._do_merge(dest)
+            self._do_merge(dest, checked_categories)
             self.log(f"\u2705 Done! Saved to: {dest}")
             messagebox.showinfo(APP_TITLE, f"Merged pack saved to:\n{dest}")
         except Exception as e:
@@ -841,42 +828,61 @@ class MergerApp(ctk.CTk):
             self.merge_btn.configure(state="normal", text="Merge Packs")
             self.progress.set(1)
 
-    def _do_merge(self, dest_path: str):
-        self.log("Scanning packs for files...")
+    def _do_merge(self, dest_path: str, checked_categories: set):
+        self.log("Scanning Collection for files...")
         self.scan_file_index()
+
+        imported_count = 0
+        if self.source_pack and checked_categories:
+            self.log(f"Scanning Source pack ({self.source_pack.name})...")
+            try:
+                with zipfile.ZipFile(self.source_pack.path, "r") as zf:
+                    for name in zf.namelist():
+                        if name.endswith("/"):
+                            continue
+                        parts = Path(name).parts
+                        if any(p in JUNK_NAMES or p.startswith("._") for p in parts):
+                            continue
+                        rel = name.replace("\\", "/")
+                        if categorize(rel) in checked_categories:
+                            self.file_index.setdefault(rel, [])
+                            if self.source_pack.path not in self.file_index[rel]:
+                                self.file_index[rel].append(
+                                    self.source_pack.path)
+                            self.assignments[rel] = self.source_pack.path
+                            imported_count += 1
+            except zipfile.BadZipFile:
+                self.log(
+                    f"\u26A0 Could not read Source pack \u2014 not a valid zip.")
 
         zip_handles = {}
         try:
-            for entry in self.packs:
+            for entry in self.collection:
                 zip_handles[entry.path] = zipfile.ZipFile(entry.path, "r")
+            if self.source_pack:
+                zip_handles[self.source_pack.path] = zipfile.ZipFile(
+                    self.source_pack.path, "r")
 
             with tempfile.TemporaryDirectory(prefix="lunarpackmerger_") as tmp:
                 merged_root = Path(tmp) / "merged"
                 merged_root.mkdir()
 
                 total = len(self.file_index)
-                conflict_count = 0
-                override_count = 0
-
                 for i, (rel_path, owners) in enumerate(self.file_index.items(), start=1):
-                    unique_owners = set(owners)
-                    if len(unique_owners) > 1:
-                        conflict_count += 1
                     winner_path = self.winner_for(rel_path)
                     if winner_path is None:
                         continue
-                    if rel_path in self.assignments and self.assignments[rel_path] == winner_path \
-                            and len(unique_owners) > 1:
-                        override_count += 1
-
                     target = merged_root / rel_path
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with zip_handles[winner_path].open(rel_path) as src, open(target, "wb") as out:
                         shutil.copyfileobj(src, out)
-
                     if i % 50 == 0:
                         self.progress.set(min(i / max(total, 1), 0.95))
                         self.update_idletasks()
+
+                if self.icon_path:
+                    shutil.copyfile(self.icon_path, merged_root / "pack.png")
+                    self.log("Applied custom pack icon.")
 
                 mcmeta_path = merged_root / "pack.mcmeta"
                 if not mcmeta_path.exists():
@@ -891,9 +897,9 @@ class MergerApp(ctk.CTk):
                     self.log(
                         "No pack.mcmeta found in inputs \u2014 wrote a default one.")
 
-                self.log(f"Conflicting files: {conflict_count} "
-                         f"({override_count} resolved by your assignments, "
-                         f"rest by pack order/first-match).")
+                if imported_count:
+                    self.log(
+                        f"Imported {imported_count} file(s) from Source pack.")
 
                 self.log("Zipping merged output...")
                 self._zip_dir(merged_root, dest_path)
